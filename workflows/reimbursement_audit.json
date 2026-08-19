@@ -1,0 +1,280 @@
+{
+  "created": "1756051200000",
+  "updated": "1756051200000",
+  "name": "Reimbursement Audit — Expense vs Recovery",
+  "description": "Monthly: pulls cost centre transactions and sales recovery lines from Tally, computes per-job expense-vs-recovery variance and status, and writes the unrecovered-spend report to Google Sheets.",
+  "tags": [],
+  "pieces": [
+    "@puchoaistudio/tool-schedule",
+    "@puchoaistudio/tool-tallyconnection",
+    "@puchoaistudio/tool-google-sheets"
+  ],
+  "template": {
+    "displayName": "Reimbursement Audit",
+    "trigger": {
+      "name": "trigger",
+      "valid": true,
+      "displayName": "1st of Every Month",
+      "type": "TOOL_TRIGGER",
+      "settings": {
+        "pieceName": "@puchoaistudio/tool-schedule",
+        "pieceVersion": "^2.0.0",
+        "input": {
+          "timezone": "Asia/Kolkata",
+          "day_of_the_month": 1,
+          "hour_of_the_day": 7
+        },
+        "sampleData": {},
+        "propertySettings": {
+          "timezone": {
+            "type": "MANUAL"
+          },
+          "day_of_the_month": {
+            "type": "MANUAL"
+          },
+          "hour_of_the_day": {
+            "type": "MANUAL"
+          }
+        },
+        "triggerName": "every_month"
+      },
+      "nextAction": {
+        "name": "step_1",
+        "type": "PIECE",
+        "valid": true,
+        "skip": false,
+        "displayName": "Ask Tally: Cost Centre Transactions",
+        "settings": {
+          "input": {
+            "tallyconnection": "",
+            "query": "Show all vouchers tagged to cost centres for this month with Cost Centre Code, Cost Category, Voucher Type, Voucher Number, Date, Ledger Name, Debit Amount, Credit Amount, and Party Ledger. Include only ledgers marked as reimbursable. Return as JSON array."
+          },
+          "pieceName": "@puchoaistudio/tool-tallyconnection",
+          "actionName": "askTally",
+          "sampleData": {},
+          "pieceVersion": "^2.1.5",
+          "propertySettings": {
+            "tallyconnection": {
+              "type": "MANUAL"
+            },
+            "query": {
+              "type": "MANUAL"
+            }
+          },
+          "errorHandlingOptions": {
+            "retryOnFailure": {
+              "value": true
+            },
+            "continueOnFailure": {
+              "value": false
+            }
+          }
+        },
+        "nextAction": {
+          "name": "step_2",
+          "type": "PIECE",
+          "valid": true,
+          "skip": false,
+          "displayName": "Ask Tally: Sales Recovery Lines",
+          "settings": {
+            "input": {
+              "tallyconnection": "",
+              "query": "Show all sales invoice line items for this month and next month that are tagged to a cost centre, with Customer Invoice Number, Invoice Date, Customer Name, Line Item Ledger, Line Item Amount, and Cost Centre Code. Return as JSON array."
+            },
+            "pieceName": "@puchoaistudio/tool-tallyconnection",
+            "actionName": "askTally",
+            "sampleData": {},
+            "pieceVersion": "^2.1.5",
+            "propertySettings": {
+              "tallyconnection": {
+                "type": "MANUAL"
+              },
+              "query": {
+                "type": "MANUAL"
+              }
+            },
+            "errorHandlingOptions": {
+              "retryOnFailure": {
+                "value": true
+              },
+              "continueOnFailure": {
+                "value": false
+              }
+            }
+          },
+          "nextAction": {
+            "name": "step_3",
+            "type": "CODE",
+            "valid": true,
+            "skip": false,
+            "displayName": "Compute Expense vs Recovery",
+            "settings": {
+              "input": {
+                "cost_data": "{{step_1['content']}}",
+                "recovery_data": "{{step_2['content']}}"
+              },
+              "sampleData": {},
+              "sourceCode": {
+                "code": "export const code = async (inputs) => {\n  const parseTally = (raw) => {\n    if (!raw) return [];\n    if (Array.isArray(raw) && raw.length > 0 && raw[0]['Json Agg']) {\n      try { return JSON.parse(raw[0]['Json Agg']); } catch(e) { return []; }\n    }\n    if (Array.isArray(raw)) return raw;\n    try { return JSON.parse(raw); } catch(e) { return []; }\n  };\n\n  const expenses = parseTally(inputs.cost_data);\n  const recoveries = parseTally(inputs.recovery_data);\n\n  const getNum = (v) => parseFloat(String(v || '0').replace(/[^0-9.-]/g, '')) || 0;\n\n  const map = {};\n  expenses.forEach(e => {\n    const cc = (e['Cost Centre'] || e.CostCentre || e.costCentre || '').trim();\n    const head = (e['Ledger'] || e.LedgerName || e.ledger || '').trim();\n    const customer = e['Party'] || e.PartyLedger || e.party || '';\n    const key = cc + '||' + head;\n    if (!map[key]) map[key] = { cc, head, customer, incurred: 0, recovered: 0 };\n    map[key].incurred += getNum(e['Debit Amount'] || e.DebitAmount || e.debit || 0);\n  });\n\n  recoveries.forEach(r => {\n    const cc = (r['Cost Centre'] || r.CostCentre || r.costCentre || '').trim();\n    const head = (r['Line Item Ledger'] || r.LineItemLedger || r.ledger || '').trim();\n    const key = cc + '||' + head;\n    if (map[key]) map[key].recovered += getNum(r['Line Item Amount'] || r.LineItemAmount || r.amount || 0);\n  });\n\n  let totalUnrecovered = 0;\n  const rows = Object.values(map).map(item => {\n    const variance = item.recovered - item.incurred;\n    let status = 'FULLY RECOVERED';\n    if (Math.abs(variance) <= 10) status = 'FULLY RECOVERED';\n    else if (variance < 0) { status = 'SHORT RECOVERED'; totalUnrecovered += Math.abs(variance); }\n    else status = 'OVER RECOVERED';\n    return {\n      'Cost Centre': item.cc,\n      'Customer': item.customer,\n      'Expense Head': item.head,\n      'Incurred': item.incurred,\n      'Recovered': item.recovered,\n      'Variance': variance,\n      'Status': status\n    };\n  });\n\n  return { rows: rows, total_rows: rows.length, total_unrecovered: totalUnrecovered };\n};",
+                "packageJson": "{}"
+              },
+              "propertySettings": {
+                "cost_data": {
+                  "type": "MANUAL"
+                },
+                "recovery_data": {
+                  "type": "MANUAL"
+                }
+              },
+              "errorHandlingOptions": {
+                "retryOnFailure": {
+                  "value": false
+                },
+                "continueOnFailure": {
+                  "value": false
+                }
+              }
+            },
+            "nextAction": {
+              "name": "step_4",
+              "type": "PIECE",
+              "valid": true,
+              "skip": false,
+              "displayName": "Clear Sheet",
+              "settings": {
+                "input": {
+                  "auth": "",
+                  "sheetId": 0,
+                  "spreadsheetId": "",
+                  "includeTeamDrives": false,
+                  "is_first_row_headers": true
+                },
+                "pieceName": "@puchoaistudio/tool-google-sheets",
+                "actionName": "clear_sheet",
+                "sampleData": {},
+                "pieceVersion": "^2.0.9",
+                "propertySettings": {
+                  "auth": {
+                    "type": "MANUAL"
+                  },
+                  "sheetId": {
+                    "type": "MANUAL"
+                  },
+                  "spreadsheetId": {
+                    "type": "MANUAL"
+                  },
+                  "includeTeamDrives": {
+                    "type": "MANUAL"
+                  },
+                  "is_first_row_headers": {
+                    "type": "MANUAL"
+                  }
+                },
+                "errorHandlingOptions": {
+                  "retryOnFailure": {
+                    "value": true
+                  },
+                  "continueOnFailure": {
+                    "value": false
+                  }
+                }
+              },
+              "nextAction": {
+                "name": "step_5",
+                "type": "PIECE",
+                "valid": true,
+                "skip": false,
+                "displayName": "Insert Results",
+                "settings": {
+                  "input": {
+                    "auth": "",
+                    "values": {
+                      "values": "{{step_3['rows']}}"
+                    },
+                    "sheetId": 0,
+                    "as_string": false,
+                    "overwrite": false,
+                    "input_type": "json",
+                    "spreadsheetId": "",
+                    "includeTeamDrives": false,
+                    "check_for_duplicate": false,
+                    "check_for_duplicate_column": {}
+                  },
+                  "pieceName": "@puchoaistudio/tool-google-sheets",
+                  "actionName": "google-sheets-insert-multiple-rows",
+                  "sampleData": {},
+                  "pieceVersion": "^2.0.9",
+                  "propertySettings": {
+                    "auth": {
+                      "type": "MANUAL"
+                    },
+                    "values": {
+                      "type": "MANUAL",
+                      "schema": {
+                        "values": {
+                          "type": "JSON",
+                          "required": true,
+                          "displayName": "JSON",
+                          "defaultValue": [
+                            {
+                              "Cost Centre": "",
+                              "Customer": "",
+                              "Expense Head": "",
+                              "Incurred": 0,
+                              "Recovered": 0,
+                              "Variance": 0,
+                              "Status": ""
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "sheetId": {
+                      "type": "MANUAL"
+                    },
+                    "as_string": {
+                      "type": "MANUAL"
+                    },
+                    "overwrite": {
+                      "type": "MANUAL"
+                    },
+                    "input_type": {
+                      "type": "MANUAL"
+                    },
+                    "spreadsheetId": {
+                      "type": "MANUAL"
+                    },
+                    "includeTeamDrives": {
+                      "type": "MANUAL"
+                    },
+                    "check_for_duplicate": {
+                      "type": "MANUAL"
+                    },
+                    "check_for_duplicate_column": {
+                      "type": "MANUAL",
+                      "schema": {}
+                    }
+                  },
+                  "errorHandlingOptions": {
+                    "retryOnFailure": {
+                      "value": false
+                    },
+                    "continueOnFailure": {
+                      "value": false
+                    }
+                  }
+                },
+                "nextAction": null
+              }
+            }
+          }
+        }
+      }
+    },
+    "valid": true,
+    "agentIds": [],
+    "connectionIds": [],
+    "schemaVersion": "7"
+  },
+  "blogUrl": ""
+}

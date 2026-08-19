@@ -1,0 +1,284 @@
+{
+  "created": "1756051200000",
+  "updated": "1756051200000",
+  "name": "GST 2B Reconciliation — Purchase-to-Bucket Classification",
+  "description": "Monthly: pulls purchase register + sales register from Tally, computes Sales Status and bucket assignment (A/B/C), and writes the classified purchase register to Google Sheets.",
+  "tags": [],
+  "pieces": [
+    "@puchoaistudio/tool-schedule",
+    "@puchoaistudio/tool-tallyconnection",
+    "@puchoaistudio/tool-google-sheets"
+  ],
+  "template": {
+    "displayName": "GST 2B Reconciliation",
+    "trigger": {
+      "name": "trigger",
+      "valid": true,
+      "displayName": "1st of Every Month",
+      "type": "TOOL_TRIGGER",
+      "settings": {
+        "pieceName": "@puchoaistudio/tool-schedule",
+        "pieceVersion": "^2.0.0",
+        "input": {
+          "timezone": "Asia/Kolkata",
+          "day_of_the_month": 1,
+          "hour_of_the_day": 6
+        },
+        "sampleData": {},
+        "propertySettings": {
+          "timezone": {
+            "type": "MANUAL"
+          },
+          "day_of_the_month": {
+            "type": "MANUAL"
+          },
+          "hour_of_the_day": {
+            "type": "MANUAL"
+          }
+        },
+        "triggerName": "every_month"
+      },
+      "nextAction": {
+        "name": "step_1",
+        "type": "PIECE",
+        "valid": true,
+        "skip": false,
+        "displayName": "Ask Tally: Purchase Register",
+        "settings": {
+          "input": {
+            "tallyconnection": "",
+            "query": "Show all purchase and debit note vouchers for this month with Date, Supplier Name, Supplier GSTIN, Voucher Type, Voucher Number, Taxable Amount, IGST Amount, CGST Amount, SGST Amount, Cess Amount, Total Tax Amount, Cost Centre, Supplier Invoice Number, Supplier Invoice Date, and Invoice Match Key. Return as JSON array."
+          },
+          "pieceName": "@puchoaistudio/tool-tallyconnection",
+          "actionName": "askTally",
+          "sampleData": {},
+          "pieceVersion": "^2.1.5",
+          "propertySettings": {
+            "tallyconnection": {
+              "type": "MANUAL"
+            },
+            "query": {
+              "type": "MANUAL"
+            }
+          },
+          "errorHandlingOptions": {
+            "retryOnFailure": {
+              "value": true
+            },
+            "continueOnFailure": {
+              "value": false
+            }
+          }
+        },
+        "nextAction": {
+          "name": "step_2",
+          "type": "PIECE",
+          "valid": true,
+          "skip": false,
+          "displayName": "Ask Tally: Sales Register",
+          "settings": {
+            "input": {
+              "tallyconnection": "",
+              "query": "Show all sales invoices for this month and next month with Date, Sales Invoice Number, Customer Name, Sales Party, Cost Centre, and Invoice Amount. Return as JSON array."
+            },
+            "pieceName": "@puchoaistudio/tool-tallyconnection",
+            "actionName": "askTally",
+            "sampleData": {},
+            "pieceVersion": "^2.1.5",
+            "propertySettings": {
+              "tallyconnection": {
+                "type": "MANUAL"
+              },
+              "query": {
+                "type": "MANUAL"
+              }
+            },
+            "errorHandlingOptions": {
+              "retryOnFailure": {
+                "value": true
+              },
+              "continueOnFailure": {
+                "value": false
+              }
+            }
+          },
+          "nextAction": {
+            "name": "step_3",
+            "type": "CODE",
+            "valid": true,
+            "skip": false,
+            "displayName": "Classify into Buckets",
+            "settings": {
+              "input": {
+                "purchase_data": "{{step_1['content']}}",
+                "sales_data": "{{step_2['content']}}"
+              },
+              "sampleData": {},
+              "sourceCode": {
+                "code": "export const code = async (inputs) => {\n  const parseTally = (raw) => {\n    if (!raw) return [];\n    if (Array.isArray(raw) && raw.length > 0 && raw[0]['Json Agg']) {\n      try { return JSON.parse(raw[0]['Json Agg']); } catch(e) { return []; }\n    }\n    if (Array.isArray(raw)) return raw;\n    try { return JSON.parse(raw); } catch(e) { return []; }\n  };\n\n  const purchases = parseTally(inputs.purchase_data);\n  const sales = parseTally(inputs.sales_data);\n\n  const billedCostCentres = new Set();\n  sales.forEach(s => {\n    const cc = s.CostCentre || s.costCentre || s.cost_centre || '';\n    if (cc) billedCostCentres.add(cc.trim());\n  });\n\n  const rows = purchases.map((p, i) => {\n    const costCentre = (p.CostCentre || p.costCentre || '').trim();\n    const salesInvoiceNo = (p['Sales Invoice No.'] || p.salesInvoiceNo || p.sales_invoice_no || '').trim();\n    const supplier = p.Particulars || p.supplier || p.party || '';\n    const gstin = p['Party GSTIN/UIN'] || p.gstin || p.GSTIN || '';\n    const taxable = parseFloat(p['Taxable Amount'] || p.taxable || 0) || 0;\n    const tax = parseFloat(p['Tax Amount'] || p.tax || 0) || 0;\n    const invoice = p['Supplier Invoice No.'] || p.invoice || p.supplierInvoice || '';\n    const date = p.Date || p.date || '';\n\n    let salesStatus = 'COST CENTRE NOT ALLOCATED';\n    if (costCentre && !salesInvoiceNo) salesStatus = 'SALES BILL PENDING';\n    else if (costCentre && salesInvoiceNo) salesStatus = 'SALES BILL FOUND';\n\n    let bucket = 'B';\n    let bucketLabel = 'Deferred — Wait for Billing';\n    if (salesStatus === 'SALES BILL FOUND') { bucket = 'A'; bucketLabel = 'Claim Now'; }\n    if (salesStatus === 'COST CENTRE NOT ALLOCATED') { bucketLabel = 'Blocked — Cost Centre Missing'; }\n\n    return {\n      Date: date,\n      Supplier: supplier,\n      GSTIN: gstin,\n      'Voucher No': p['Vch No.'] || p.VchNo || p.VoucherNo || '',\n      'Taxable Amount': taxable,\n      'Tax Amount': tax,\n      'Cost Centre': costCentre,\n      'Sales Invoice No': salesInvoiceNo,\n      'Sales Status': salesStatus,\n      Bucket: bucket,\n      'Bucket Label': bucketLabel\n    };\n  });\n\n  const sheetRows = rows.map(r => ({\n    'Date': r.Date,\n    'Supplier': r.Supplier,\n    'GSTIN': r.GSTIN,\n    'Voucher No': r['Voucher No'],\n    'Taxable Amount': r['Taxable Amount'],\n    'Tax Amount': r['Tax Amount'],\n    'Cost Centre': r['Cost Centre'],\n    'Sales Invoice No': r['Sales Invoice No'],\n    'Sales Status': r['Sales Status'],\n    'Bucket': r.Bucket,\n    'Bucket Label': r['Bucket Label']\n  }));\n\n  return { rows: sheetRows, total_rows: sheetRows.length, bucket_a: rows.filter(r => r.Bucket === 'A').length, bucket_b: rows.filter(r => r.Bucket === 'B').length };\n};",
+                "packageJson": "{}"
+              },
+              "propertySettings": {
+                "purchase_data": {
+                  "type": "MANUAL"
+                },
+                "sales_data": {
+                  "type": "MANUAL"
+                }
+              },
+              "errorHandlingOptions": {
+                "retryOnFailure": {
+                  "value": false
+                },
+                "continueOnFailure": {
+                  "value": false
+                }
+              }
+            },
+            "nextAction": {
+              "name": "step_4",
+              "type": "PIECE",
+              "valid": true,
+              "skip": false,
+              "displayName": "Clear Sheet",
+              "settings": {
+                "input": {
+                  "auth": "",
+                  "sheetId": 0,
+                  "spreadsheetId": "",
+                  "includeTeamDrives": false,
+                  "is_first_row_headers": true
+                },
+                "pieceName": "@puchoaistudio/tool-google-sheets",
+                "actionName": "clear_sheet",
+                "sampleData": {},
+                "pieceVersion": "^2.0.9",
+                "propertySettings": {
+                  "auth": {
+                    "type": "MANUAL"
+                  },
+                  "sheetId": {
+                    "type": "MANUAL"
+                  },
+                  "spreadsheetId": {
+                    "type": "MANUAL"
+                  },
+                  "includeTeamDrives": {
+                    "type": "MANUAL"
+                  },
+                  "is_first_row_headers": {
+                    "type": "MANUAL"
+                  }
+                },
+                "errorHandlingOptions": {
+                  "retryOnFailure": {
+                    "value": true
+                  },
+                  "continueOnFailure": {
+                    "value": false
+                  }
+                }
+              },
+              "nextAction": {
+                "name": "step_5",
+                "type": "PIECE",
+                "valid": true,
+                "skip": false,
+                "displayName": "Insert Results",
+                "settings": {
+                  "input": {
+                    "auth": "",
+                    "values": {
+                      "values": "{{step_3['rows']}}"
+                    },
+                    "sheetId": 0,
+                    "as_string": false,
+                    "overwrite": false,
+                    "input_type": "json",
+                    "spreadsheetId": "",
+                    "includeTeamDrives": false,
+                    "check_for_duplicate": false,
+                    "check_for_duplicate_column": {}
+                  },
+                  "pieceName": "@puchoaistudio/tool-google-sheets",
+                  "actionName": "google-sheets-insert-multiple-rows",
+                  "sampleData": {},
+                  "pieceVersion": "^2.0.9",
+                  "propertySettings": {
+                    "auth": {
+                      "type": "MANUAL"
+                    },
+                    "values": {
+                      "type": "MANUAL",
+                      "schema": {
+                        "values": {
+                          "type": "JSON",
+                          "required": true,
+                          "displayName": "JSON",
+                          "defaultValue": [
+                            {
+                              "Date": "2026-06-01",
+                              "Supplier": "Example",
+                              "GSTIN": "",
+                              "Voucher No": "",
+                              "Taxable Amount": 0,
+                              "Tax Amount": 0,
+                              "Cost Centre": "",
+                              "Sales Invoice No": "",
+                              "Sales Status": "",
+                              "Bucket": "",
+                              "Bucket Label": ""
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "sheetId": {
+                      "type": "MANUAL"
+                    },
+                    "as_string": {
+                      "type": "MANUAL"
+                    },
+                    "overwrite": {
+                      "type": "MANUAL"
+                    },
+                    "input_type": {
+                      "type": "MANUAL"
+                    },
+                    "spreadsheetId": {
+                      "type": "MANUAL"
+                    },
+                    "includeTeamDrives": {
+                      "type": "MANUAL"
+                    },
+                    "check_for_duplicate": {
+                      "type": "MANUAL"
+                    },
+                    "check_for_duplicate_column": {
+                      "type": "MANUAL",
+                      "schema": {}
+                    }
+                  },
+                  "errorHandlingOptions": {
+                    "retryOnFailure": {
+                      "value": false
+                    },
+                    "continueOnFailure": {
+                      "value": false
+                    }
+                  }
+                },
+                "nextAction": null
+              }
+            }
+          }
+        }
+      }
+    },
+    "valid": true,
+    "agentIds": [],
+    "connectionIds": [],
+    "schemaVersion": "7"
+  },
+  "blogUrl": ""
+}
