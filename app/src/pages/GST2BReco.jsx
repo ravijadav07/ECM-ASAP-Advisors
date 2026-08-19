@@ -1,11 +1,11 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { TicketCheck, Timer, MailWarning, FileQuestion, ArrowRightLeft, AlertTriangle, HardDrive, RefreshCw } from 'lucide-react';
+import { TicketCheck, Timer, MailWarning, FileQuestion, ArrowRightLeft, AlertTriangle, HardDrive, RefreshCw, Upload, FileCheck } from 'lucide-react';
 import { StatCard, Card, Tabs, Badge } from '../components/ui';
 import { DataTable, Modal } from '../components/UiComponents';
 import { useView } from '../context/ViewContext';
 import { carryForward } from '../data/mockData';
-import { inr, daysSince, getFinancialYearRange, formatDate } from '../utils/format';
-import { computeSalesStatus, computeGstr2bState, computeBucket, hasDataGap, SALES_STATUS, GSTR2B_STATE } from '../utils/gst2b';
+import { inr, inrCompact, daysSince, getFinancialYearRange, formatDate } from '../utils/format';
+import { computeSalesStatus, computeGstr2bState, computeBucket, hasDataGap, SALES_STATUS, GSTR2B_STATE, matchAgainstGstr2b } from '../utils/gst2b';
 import { mapGst2bRows } from '../utils/tallyMapper';
 import { executeTemplate, getTemplateCache, setTemplateCache } from '../services/tallyApi';
 import { getTemplate } from '../config/tallyTemplates';
@@ -116,6 +116,26 @@ export default function GST2BReco() {
 
   const [fetching, setFetching] = useState(false);
   const fetchIdRef = useRef(0); // tracks latest fetch, prevents stale overwrites
+  const [gstr2bData, setGstr2bData] = useState(null); // parsed GSTR-2B JSON
+  const fileInputRef = useRef(null);
+
+  const handleGstr2bUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        setGstr2bData(parsed);
+        console.log('[GST 2B] GSTR-2B JSON loaded:', file.name);
+      } catch (err) {
+        console.error('[GST 2B] Failed to parse GSTR-2B JSON:', err);
+        setGstr2bData(null);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // allow re-uploading the same file
+  };
 
   const handleTallyData = (data) => {
     const id = ++fetchIdRef.current;
@@ -148,13 +168,18 @@ export default function GST2BReco() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Compute sales status, GSTR-2B state, bucket, and data-gap for every row
-  const computedRows = useMemo(() => (liveRows || []).map((r) => {
-    const salesStatus = computeSalesStatus(r);
-    const gstr2bState = computeGstr2bState(r);
-    const bucket = computeBucket(gstr2bState, salesStatus);
-    const dataGap = hasDataGap(salesStatus);
-    return { ...r, _salesStatus: salesStatus, _gstr2bState: gstr2bState, _bucket: bucket, _dataGap: dataGap };
-  }), [liveRows]);
+  const computedRows = useMemo(() => {
+    const base = (liveRows || []);
+    // Apply GSTR-2B matching if 2B JSON is uploaded
+    const matched = gstr2bData ? matchAgainstGstr2b(base, gstr2bData) : base;
+    return matched.map((r) => {
+      const salesStatus = computeSalesStatus(r);
+      const gstr2bState = computeGstr2bState(r);
+      const bucket = computeBucket(gstr2bState, salesStatus);
+      const dataGap = hasDataGap(salesStatus);
+      return { ...r, _salesStatus: salesStatus, _gstr2bState: gstr2bState, _bucket: bucket, _dataGap: dataGap };
+    });
+  }, [liveRows, gstr2bData]);
 
   // Bucket counts exclude hold (needs review) from A/B/C
   const bucketCounts = {
@@ -186,6 +211,31 @@ export default function GST2BReco() {
         />
       </div>
 
+      {liveRows && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={handleGstr2bUpload}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="h-9 px-4 inline-flex items-center gap-2 rounded-full text-xs font-medium border border-dashed border-brand/40 bg-brand-50/30 text-brand hover:bg-brand-50 transition-colors"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            {gstr2bData ? 'Change GSTR-2B JSON' : 'Upload GSTR-2B JSON'}
+          </button>
+          {gstr2bData && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <FileCheck className="w-3.5 h-3.5" />
+              GSTR-2B loaded — {computedRows.filter(r => r.gstr2bTier === 'exact' || r.gstr2bTier === 'near').length} matched, {computedRows.filter(r => r.gstr2bTier === 'unmatched').length} unmatched
+            </span>
+          )}
+        </div>
+      )}
+
       {!liveRows ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           {fetching ? (
@@ -215,7 +265,7 @@ export default function GST2BReco() {
             <MailWarning className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
             <div>
               <h3 className="text-sm font-semibold text-ink">{bucketCounts.C} supplier{ bucketCounts.C !== 1 ? 's' : '' } to follow up — Bucket C</h3>
-              <p className="text-xs text-ink-muted mt-1">₹ {inr(bucketValues.C)} in input credit at stake. Click a row to view supplier detail, then mark follow-up sent.</p>
+              <p className="text-xs text-ink-muted mt-1">₹ {inrCompact(bucketValues.C)} in input credit at stake. Click a row to view supplier detail, then mark follow-up sent.</p>
             </div>
           </div>
         </Card>
@@ -226,14 +276,14 @@ export default function GST2BReco() {
         <StatCard
           icon={TicketCheck}
           label="Total Purchase Register"
-          value={inr(total2B)}
+          value={inrCompact(total2B)}
           sub={`${computedRows.length} rows loaded`}
           tone="default"
         />
         <StatCard
           icon={TicketCheck}
           label="Claimable This Month (A)"
-          value={inr(bucketValues.A)}
+          value={inrCompact(bucketValues.A)}
           tone="green"
           sub={`${bucketCounts.A} records`}
           onClick={() => setTab('A')}
@@ -241,7 +291,7 @@ export default function GST2BReco() {
         <StatCard
           icon={Timer}
           label="Parked — Deferred (B)"
-          value={inr(bucketValues.B)}
+          value={inrCompact(bucketValues.B)}
           tone="lavender"
           sub={`${bucketCounts.B} records waiting for sale invoice`}
           onClick={() => setTab('B')}
@@ -249,7 +299,7 @@ export default function GST2BReco() {
         <StatCard
           icon={MailWarning}
           label="Not Uploaded by Supplier (C)"
-          value={inr(bucketValues.C)}
+          value={inrCompact(bucketValues.C)}
           tone="amber"
           sub={`${bucketCounts.C} suppliers to follow up`}
           onClick={() => setTab('C')}
@@ -257,7 +307,7 @@ export default function GST2BReco() {
         <StatCard
           icon={AlertTriangle}
           label="Needs Review (Hold)"
-          value={inr(bucketValues.hold)}
+          value={inrCompact(bucketValues.hold)}
           tone="orange"
           sub={`${bucketCounts.hold} probable matches — excluded from A/B/C totals`}
           onClick={() => setTab('hold')}

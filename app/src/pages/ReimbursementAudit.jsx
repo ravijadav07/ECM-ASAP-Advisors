@@ -13,7 +13,7 @@ export default function ReimbursementAudit() {
   const { view } = useView();
   const [tab, setTab] = useState('all');
   const [drill, setDrill] = useState(null);
-  const [viewType, setViewType] = useState('jobs');
+  const [viewType, setViewType] = useState('lines');
   const [loading, setLoading] = useState(false);
 const [liveRows, setLiveRows] = useState(() => {
     const tpl = getTemplate('reimbursementAudit');

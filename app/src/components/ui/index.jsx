@@ -58,7 +58,7 @@ export function StatCard({ icon: Icon, label, value, sub, tone = 'default', onCl
         </div>
       </div>
       <div>
-        <h3 className="text-xl lg:text-2xl font-bold text-ink leading-tight font-display whitespace-nowrap overflow-hidden text-ellipsis">{value}</h3>
+        <h3 className="text-xl lg:text-2xl font-bold text-ink leading-tight font-display">{value}</h3>
         <p className="text-sm text-ink-muted mt-0.5">{label}</p>
         {sub && <p className="text-[11px] text-ink-faint mt-1">{sub}</p>}
       </div>

@@ -41,3 +41,83 @@ export function computeBucket(gstr2bState, salesStatus) {
 export function hasDataGap(salesStatus) {
   return salesStatus === 'cc-not-allocated';
 }
+
+/** Normalize an invoice number for matching — strips special chars, uppercases. */
+function normalizeInv(s) {
+  return String(s || '').replace(/[\s/-]+/g, '').toUpperCase();
+}
+
+/** Extract flat invoice records from GSTR-2B JSON. Handles varying portal structures. */
+function extractGstr2bInvoices(raw) {
+  const records = [];
+  if (!raw) return records;
+  try {
+    // Common GST portal format: data.docData.b2b[]
+    const b2b = raw?.data?.docData?.b2b || raw?.data?.b2b || raw?.b2b || [];
+    for (const supplier of b2b) {
+      const gstin = (supplier.ctin || supplier.gstin || '').trim();
+      const invs = supplier.inv || supplier.invoices || [];
+      for (const inv of invs) {
+        records.push({
+          gstin,
+          invoice: inv.inum || inv.invoice || '',
+          date: inv.idt || inv.date || '',
+          taxable: parseFloat(inv.val || inv.taxable || inv.value || 0) || 0,
+        });
+      }
+    }
+    // Also check flat structures
+    if (records.length === 0 && Array.isArray(raw)) {
+      for (const r of raw) {
+        records.push({
+          gstin: (r.ctin || r.gstin || '').trim(),
+          invoice: r.inum || r.invoice || '',
+          date: r.idt || r.date || '',
+          taxable: parseFloat(r.val || r.taxable || 0) || 0,
+        });
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return records;
+}
+
+/**
+ * Match purchase rows against GSTR-2B data using tiered matching.
+ * Returns new rows with updated gstr2bTier.
+ */
+export function matchAgainstGstr2b(purchaseRows, gstr2bData) {
+  const records = extractGstr2bInvoices(gstr2bData);
+  if (records.length === 0) return purchaseRows; // no 2B data → keep current tiers
+
+  // Build lookup: GSTIN + normalized invoice → records
+  const lookup = new Map();
+  for (const rec of records) {
+    const key = rec.gstin + '|' + normalizeInv(rec.invoice);
+    if (!lookup.has(key)) lookup.set(key, []);
+    lookup.get(key).push(rec);
+  }
+
+  return purchaseRows.map((row) => {
+    const gstin = (row.gstin || '').trim();
+    const inv = normalizeInv(row.invoice || row.invoiceMatchKey || '');
+    const candidates = lookup.get(gstin + '|' + inv) || [];
+
+    if (candidates.length === 0) return { ...row, gstr2bTier: 'unmatched' };
+
+    // Exact: GSTIN + invoice + date + value match
+    const dateStr = (row.supplierInvoiceDate || row.date || '').trim();
+    const exact = candidates.find((r) => {
+      const dMatch = r.date === dateStr || (!r.date && !dateStr);
+      const vMatch = Math.abs((r.taxable || 0) - (row.taxable || 0)) < 0.50;
+      return dMatch && vMatch;
+    });
+    if (exact) return { ...row, gstr2bTier: 'exact' };
+
+    // Near: GSTIN + invoice + date match, value within tolerance
+    const near = candidates.find((r) => r.date === dateStr || (!r.date && !dateStr));
+    if (near) return { ...row, gstr2bTier: 'near' };
+
+    // Probable: GSTIN + invoice match, date/value differ
+    return { ...row, gstr2bTier: 'probable' };
+  });
+}
