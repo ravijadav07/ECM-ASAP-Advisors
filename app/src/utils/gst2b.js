@@ -13,11 +13,53 @@ export const GSTR2B_STATE = {
   'not-available': { label: 'Not Available in GSTR-2B', tone: 'red' },
 };
 
-// 4 explicit cases, not an implicit else
+// 4 explicit cases, not an implicit else.
+// Tally now returns a "Sales Status" column directly — use it first.
 export function computeSalesStatus(row) {
-  if (!row.costCentre) return 'cc-not-allocated'; // cases 1 & 2
-  if (!row.salesInvoiceNo) return 'sales-pending'; // case 3
+  const raw = findField(row, ['sales status', 'sales_status']);
+  if (raw) {
+    const s = raw.toUpperCase();
+    if (/NOT.*ALLOCATED|NOT.*ALLOC|NO.*CC|MISSING.*CC/i.test(s)) return 'cc-not-allocated';
+    if (/PENDING|NOT.*RAISED|NOT.*BILLED/i.test(s)) return 'sales-pending';
+    if (/FOUND|BILLED|RAISED|SALES.*BILL/i.test(s)) return 'sales-found';
+  }
+  // Fallback: compute from cost centre + sales invoice fields
+  const cc = findField(row, ['cost centre', 'costcentre', 'cost center', 'job', 'cc']);
+  const salesInv = findField(row, ['sales invoice no', 'sales bill no', 'sales invoice', 'bill no', 'sales invoice number', 'sale invoice']);
+  if (!cc) return 'cc-not-allocated'; // cases 1 & 2
+  if (!salesInv) return 'sales-pending'; // case 3
   return 'sales-found'; // case 4
+}
+
+/** Find the first non-empty value for a field by fuzzy-matching row keys.
+ *  Returns '' if not found. */
+function findField(row, searchTerms) {
+  if (!row || typeof row !== 'object') return '';
+  const keys = Object.keys(row);
+  for (const term of searchTerms) {
+    for (const k of keys) {
+      if (k.toLowerCase().includes(term)) {
+        const v = row[k];
+        if (v !== null && v !== undefined && String(v).trim() !== '') return String(v).trim();
+      }
+    }
+  }
+  return '';
+}
+
+/** Extract a numeric value for a field by fuzzy-matching row keys. */
+export function findNumberField(row, searchTerms) {
+  if (!row || typeof row !== 'object') return 0;
+  const keys = Object.keys(row);
+  for (const term of searchTerms) {
+    for (const k of keys) {
+      if (k.toLowerCase().includes(term)) {
+        const n = parseFloat(String(row[k] ?? '').replace(/[^0-9.-]/g, ''));
+        if (Number.isFinite(n)) return n;
+      }
+    }
+  }
+  return 0;
 }
 
 // Match state depends on GSTR-2B matching. Rows not in the uploaded 2B JSON → not-available.
@@ -40,84 +82,4 @@ export function computeBucket(gstr2bState, salesStatus) {
 // Whether the row has a data-gap (cost centre not allocated)
 export function hasDataGap(salesStatus) {
   return salesStatus === 'cc-not-allocated';
-}
-
-/** Normalize an invoice number for matching — strips special chars, uppercases. */
-function normalizeInv(s) {
-  return String(s || '').replace(/[\s/-]+/g, '').toUpperCase();
-}
-
-/** Extract flat invoice records from GSTR-2B JSON. Handles varying portal structures. */
-function extractGstr2bInvoices(raw) {
-  const records = [];
-  if (!raw) return records;
-  try {
-    // Common GST portal format: data.docData.b2b[]
-    const b2b = raw?.data?.docData?.b2b || raw?.data?.b2b || raw?.b2b || [];
-    for (const supplier of b2b) {
-      const gstin = (supplier.ctin || supplier.gstin || '').trim();
-      const invs = supplier.inv || supplier.invoices || [];
-      for (const inv of invs) {
-        records.push({
-          gstin,
-          invoice: inv.inum || inv.invoice || '',
-          date: inv.idt || inv.date || '',
-          taxable: parseFloat(inv.val || inv.taxable || inv.value || 0) || 0,
-        });
-      }
-    }
-    // Also check flat structures
-    if (records.length === 0 && Array.isArray(raw)) {
-      for (const r of raw) {
-        records.push({
-          gstin: (r.ctin || r.gstin || '').trim(),
-          invoice: r.inum || r.invoice || '',
-          date: r.idt || r.date || '',
-          taxable: parseFloat(r.val || r.taxable || 0) || 0,
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
-  return records;
-}
-
-/**
- * Match purchase rows against GSTR-2B data using tiered matching.
- * Returns new rows with updated gstr2bTier.
- */
-export function matchAgainstGstr2b(purchaseRows, gstr2bData) {
-  const records = extractGstr2bInvoices(gstr2bData);
-  if (records.length === 0) return purchaseRows; // no 2B data → keep current tiers
-
-  // Build lookup: GSTIN + normalized invoice → records
-  const lookup = new Map();
-  for (const rec of records) {
-    const key = rec.gstin + '|' + normalizeInv(rec.invoice);
-    if (!lookup.has(key)) lookup.set(key, []);
-    lookup.get(key).push(rec);
-  }
-
-  return purchaseRows.map((row) => {
-    const gstin = (row.gstin || '').trim();
-    const inv = normalizeInv(row.invoice || row.invoiceMatchKey || '');
-    const candidates = lookup.get(gstin + '|' + inv) || [];
-
-    if (candidates.length === 0) return { ...row, gstr2bTier: 'unmatched' };
-
-    // Exact: GSTIN + invoice + date + value match
-    const dateStr = (row.supplierInvoiceDate || row.date || '').trim();
-    const exact = candidates.find((r) => {
-      const dMatch = r.date === dateStr || (!r.date && !dateStr);
-      const vMatch = Math.abs((r.taxable || 0) - (row.taxable || 0)) < 0.50;
-      return dMatch && vMatch;
-    });
-    if (exact) return { ...row, gstr2bTier: 'exact' };
-
-    // Near: GSTIN + invoice + date match, value within tolerance
-    const near = candidates.find((r) => r.date === dateStr || (!r.date && !dateStr));
-    if (near) return { ...row, gstr2bTier: 'near' };
-
-    // Probable: GSTIN + invoice match, date/value differ
-    return { ...row, gstr2bTier: 'probable' };
-  });
 }

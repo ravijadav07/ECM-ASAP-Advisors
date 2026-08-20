@@ -1,12 +1,13 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { TicketCheck, Timer, MailWarning, FileQuestion, ArrowRightLeft, AlertTriangle, HardDrive, RefreshCw, Upload, FileCheck } from 'lucide-react';
-import { StatCard, Card, Tabs, Badge } from '../components/ui';
+import { TicketCheck, Timer, MailWarning, FileQuestion, ArrowRightLeft, AlertTriangle, HardDrive, RefreshCw } from 'lucide-react';
+import { StatCard, Card, Tabs, Badge, UploadPanel } from '../components/ui';
 import { DataTable, Modal } from '../components/UiComponents';
 import { useView } from '../context/ViewContext';
 import { carryForward } from '../data/mockData';
 import { inr, inrCompact, daysSince, getFinancialYearRange, formatDate } from '../utils/format';
-import { computeSalesStatus, computeGstr2bState, computeBucket, hasDataGap, SALES_STATUS, GSTR2B_STATE, matchAgainstGstr2b } from '../utils/gst2b';
-import { mapGst2bRows } from '../utils/tallyMapper';
+import { computeSalesStatus, computeGstr2bState, computeBucket, hasDataGap, SALES_STATUS, GSTR2B_STATE } from '../utils/gst2b';
+import { flattenPortal2b, reconcileWithPortal } from '../utils/gstr2bMatch';
+import { mapGst2bRows, getColumnKeys } from '../utils/tallyMapper';
 import { executeTemplate, getTemplateCache, setTemplateCache } from '../services/tallyApi';
 import { getTemplate } from '../config/tallyTemplates';
 import TallyFetchBar from '../components/TallyFetchBar';
@@ -27,56 +28,60 @@ const TABS_CONFIG = [
   { id: 'cf', label: 'Carry-Forward' },
 ];
 
-const COLUMNS = [
-  { header: 'Date', accessor: 'date', render: (r) => formatDate(r.date), exportValue: (r) => r.date },
-  { header: 'Particulars', accessor: 'supplier', exportValue: (r) => r.supplier },
-  { header: 'Party GSTIN/UIN', accessor: 'gstin', exportValue: (r) => r.gstin },
-  { header: 'Vch Type', accessor: 'vchType', exportValue: (r) => r.vchType },
-  { header: 'Vch No.', accessor: 'vchNo', exportValue: (r) => r.vchNo },
-  { header: 'Taxable Amount', accessor: 'taxable', align: 'right', render: (r) => inr(r.taxable), exportValue: (r) => r.taxable },
-  { header: 'IGST', accessor: 'igst', align: 'right', render: (r) => inr(r.igst), exportValue: (r) => r.igst },
-  { header: 'CGST', accessor: 'cgst', align: 'right', render: (r) => inr(r.cgst), exportValue: (r) => r.cgst },
-  { header: 'SGST/UTGST', accessor: 'sgst', align: 'right', render: (r) => inr(r.sgst), exportValue: (r) => r.sgst },
-  { header: 'Cess', accessor: 'cess', align: 'right', render: (r) => inr(r.cess), exportValue: (r) => r.cess },
-  { header: 'Tax Amount', accessor: 'tax', align: 'right', render: (r) => inr(r.tax), exportValue: (r) => r.tax },
-  { header: 'CostCentre', accessor: 'costCentre', exportValue: (r) => r.costCentre },
-  { header: 'Sales Invoice Date', accessor: 'salesInvoiceDate', render: (r) => formatDate(r.salesInvoiceDate), exportValue: (r) => r.salesInvoiceDate },
-  { header: 'Sales Invoice No.', accessor: 'salesInvoiceNo', exportValue: (r) => r.salesInvoiceNo },
-  { header: 'Sales Party', accessor: 'salesParty', exportValue: (r) => r.salesParty },
-  { header: 'Supplier Invoice No.', accessor: 'invoice', exportValue: (r) => r.invoice },
-  { header: 'Supplier Invoice Date', accessor: 'supplierInvoiceDate', render: (r) => formatDate(r.supplierInvoiceDate), exportValue: (r) => r.supplierInvoiceDate },
-  { header: 'Invoice Match Key', accessor: 'invoiceMatchKey', exportValue: (r) => r.invoiceMatchKey },
-  {
-    header: 'Sales Status',
-    render: (r) => {
-      const s = r._salesStatus;
-      return <Badge tone={SALES_STATUS[s].tone}>{SALES_STATUS[s].label}</Badge>;
+/** Build table columns dynamically from the actual Tally response keys.
+ *  Each raw column is shown exactly as-is. The Reconciliation
+ *  badge is appended. */
+function buildColumns(columnKeys, jsonUploaded) {
+  const rawCols = columnKeys.map((key) => ({
+    header: key,
+    accessor: key,
+    align: isNumericHeader(key) ? 'right' : undefined,
+    render: isDateHeader(key) ? (r) => formatDate(r[key]) : isNumericHeader(key) ? (r) => inr(r[key]) : undefined,
+    exportValue: (r) => String(r[key] ?? ''),
+  }));
+  return [
+    ...rawCols,
+    {
+      header: 'Reconciliation',
+      render: (r) => {
+        const st = reconciliationStatus(r, jsonUploaded);
+        return <Badge tone={st.tone}>{st.label}</Badge>;
+      },
+      exportValue: (r) => reconciliationStatus(r, jsonUploaded).label,
     },
-    exportValue: (r) => SALES_STATUS[r._salesStatus].label + (r._dataGap ? ' (Data Gap)' : ''),
-  },
-  {
-    header: 'GSTR-2B',
-    render: (r) => <Badge tone={GSTR2B_STATE[r._gstr2bState].tone}>{GSTR2B_STATE[r._gstr2bState].label}</Badge>,
-    exportValue: (r) => GSTR2B_STATE[r._gstr2bState].label,
-  },
-  {
-    header: 'Reconciliation',
-    render: (r) => {
-      const b = r._bucket;
-      return (
-        <span className="inline-flex items-center gap-1">
-          {b === 'hold' ? (
-            <Badge tone="orange">Needs Review</Badge>
-          ) : (
-            <Badge tone={BUCKET_MAP[b].tone}>{BUCKET_MAP[b].label}</Badge>
-          )}
-          {r._dataGap && b === 'B' && <Badge tone="red">Blocked — Cost Centre</Badge>}
-        </span>
-      );
-    },
-    exportValue: (r) => (r._bucket === 'hold' ? 'Needs Review' : BUCKET_MAP[r._bucket].label) + (r._dataGap && r._bucket === 'B' ? ' (Blocked - Cost Centre)' : ''),
-  },
-];
+  ];
+}
+
+/** Reconciliation status — priority-ordered, first match wins.
+ *  CostCentre is not referenced in this column (tracked in Sales Status).
+ *  Probable-tier matches map to Not Matched (not auto-labeled Reconciled).
+ */
+function reconciliationStatus(r, jsonUploaded) {
+  // Priority 1 — no JSON uploaded at all
+  if (!jsonUploaded) return { tone: 'grey', label: 'JSON Not Uploaded' };
+
+  // JSON is uploaded — evaluate by match tier
+  const tier = (r.gstr2bTier || '').toLowerCase();
+
+  // Priority 2 — exact match: details tie out
+  if (tier === 'exact' || tier === 'near') return { tone: 'green', label: 'Reconciled' };
+
+  // Priority 3 — found in JSON, but details differ (probable = ambiguous)
+  if (tier === 'probable') return { tone: 'orange', label: 'Not Matched' };
+
+  // Priority 4 — entirely absent from the uploaded JSON
+  return { tone: 'red', label: 'Not in GSTR-2B Portal' };
+}
+
+function isNumericHeader(header) {
+  const h = (header || '').toLowerCase();
+  return /amount|tax|igst|cgst|sgst|cess|value|debit|credit|total/i.test(h);
+}
+
+function isDateHeader(header) {
+  const h = (header || '').toLowerCase();
+  return /date/i.test(h);
+}
 
 const PARKED_COLS = [
   { header: 'Supplier', accessor: 'supplier' },
@@ -116,25 +121,32 @@ export default function GST2BReco() {
 
   const [fetching, setFetching] = useState(false);
   const fetchIdRef = useRef(0); // tracks latest fetch, prevents stale overwrites
-  const [gstr2bData, setGstr2bData] = useState(null); // parsed GSTR-2B JSON
-  const fileInputRef = useRef(null);
 
-  const handleGstr2bUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result);
-        setGstr2bData(parsed);
-        console.log('[GST 2B] GSTR-2B JSON loaded:', file.name);
-      } catch (err) {
-        console.error('[GST 2B] Failed to parse GSTR-2B JSON:', err);
-        setGstr2bData(null);
+  // GSTR-2B JSON upload (functional doc §Module 1). Tally provides the purchase
+  // register live; the uploaded portal JSON is parsed and matched against it.
+  const [reqFiles, setReqFiles] = useState([
+    { name: 'gstr2b', label: 'Upload GSTR-2B JSON', status: 'missing' },
+  ]);
+  const [portal2b, setPortal2b] = useState(null); // flattened portal docs, or null
+  const [parseError, setParseError] = useState('');
+
+  const handle2bJson = (slotName, text) => {
+    setParseError('');
+    try {
+      const json = JSON.parse(text);
+      const { period, docs } = flattenPortal2b(json);
+      if (!docs.length) {
+        setParseError('No B2B invoices found in this file — is it a GSTR-2B JSON?');
+        setPortal2b(null);
+        return { read: 0, rejected: 1, reasons: ['No docdata.b2b invoices found'], names: [] };
       }
-    };
-    reader.readAsText(file);
-    e.target.value = ''; // allow re-uploading the same file
+      setPortal2b(docs);
+      return { read: docs.length, rejected: 0, reasons: [], names: [`GSTR-2B ${period || ''} — ${docs.length} portal documents`] };
+    } catch (err) {
+      setParseError('Could not parse the file as JSON.');
+      setPortal2b(null);
+      return { read: 0, rejected: 1, reasons: ['Invalid JSON: ' + (err?.message || 'parse error')], names: [] };
+    }
   };
 
   const handleTallyData = (data) => {
@@ -167,19 +179,23 @@ export default function GST2BReco() {
       .finally(() => setFetching(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Reconcile against the uploaded GSTR-2B portal JSON (if present): this sets each
+  // row's gstr2bTier (exact/near/probable/unmatched) which drives the A/B/C bucket.
+  const { reconciledRows, matchCounts } = useMemo(() => {
+    const base = liveRows || [];
+    if (!portal2b) return { reconciledRows: base, matchCounts: null };
+    const { rows, counts } = reconcileWithPortal(base, portal2b);
+    return { reconciledRows: rows, matchCounts: counts };
+  }, [liveRows, portal2b]);
+
   // Compute sales status, GSTR-2B state, bucket, and data-gap for every row
-  const computedRows = useMemo(() => {
-    const base = (liveRows || []);
-    // Apply GSTR-2B matching if 2B JSON is uploaded
-    const matched = gstr2bData ? matchAgainstGstr2b(base, gstr2bData) : base;
-    return matched.map((r) => {
-      const salesStatus = computeSalesStatus(r);
-      const gstr2bState = computeGstr2bState(r);
-      const bucket = computeBucket(gstr2bState, salesStatus);
-      const dataGap = hasDataGap(salesStatus);
-      return { ...r, _salesStatus: salesStatus, _gstr2bState: gstr2bState, _bucket: bucket, _dataGap: dataGap };
-    });
-  }, [liveRows, gstr2bData]);
+  const computedRows = useMemo(() => reconciledRows.map((r) => {
+    const salesStatus = computeSalesStatus(r);
+    const gstr2bState = computeGstr2bState(r);
+    const bucket = computeBucket(gstr2bState, salesStatus);
+    const dataGap = hasDataGap(salesStatus);
+    return { ...r, _salesStatus: salesStatus, _gstr2bState: gstr2bState, _bucket: bucket, _dataGap: dataGap };
+  }), [reconciledRows]);
 
   // Bucket counts exclude hold (needs review) from A/B/C
   const bucketCounts = {
@@ -190,13 +206,17 @@ export default function GST2BReco() {
   };
 
   const bucketValues = {
-    A: computedRows.filter((r) => r._bucket === 'A').reduce((s, r) => s + r.tax, 0),
-    B: computedRows.filter((r) => r._bucket === 'B').reduce((s, r) => s + r.tax, 0),
-    C: computedRows.filter((r) => r._bucket === 'C').reduce((s, r) => s + r.tax, 0),
-    hold: computedRows.filter((r) => r._bucket === 'hold').reduce((s, r) => s + r.tax, 0),
+    A: computedRows.filter((r) => r._bucket === 'A').reduce((s, r) => s + (r._tax || 0), 0),
+    B: computedRows.filter((r) => r._bucket === 'B').reduce((s, r) => s + (r._tax || 0), 0),
+    C: computedRows.filter((r) => r._bucket === 'C').reduce((s, r) => s + (r._tax || 0), 0),
+    hold: computedRows.filter((r) => r._bucket === 'hold').reduce((s, r) => s + (r._tax || 0), 0),
   };
 
-  const total2B = computedRows.reduce((s, r) => s + r.tax, 0);
+  const total2B = computedRows.reduce((s, r) => s + (r._tax || 0), 0);
+
+  // Dynamic columns: whatever keys Tally returns, those are the columns
+  const columnKeys = useMemo(() => getColumnKeys(computedRows), [computedRows]);
+  const columns = useMemo(() => buildColumns(columnKeys, !!portal2b), [columnKeys, portal2b]);
 
   const filtered = tab === 'all' ? computedRows : computedRows.filter((r) => r._bucket === tab);
   const cfParked = carryForward.parked;
@@ -211,29 +231,42 @@ export default function GST2BReco() {
         />
       </div>
 
-      {liveRows && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json"
-            className="hidden"
-            onChange={handleGstr2bUpload}
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="h-9 px-4 inline-flex items-center gap-2 rounded-full text-xs font-medium border border-dashed border-brand/40 bg-brand-50/30 text-brand hover:bg-brand-50 transition-colors"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            {gstr2bData ? 'Change GSTR-2B JSON' : 'Upload GSTR-2B JSON'}
-          </button>
-          {gstr2bData && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
-              <FileCheck className="w-3.5 h-3.5" />
-              GSTR-2B loaded — {computedRows.filter(r => r.gstr2bTier === 'exact' || r.gstr2bTier === 'near').length} matched, {computedRows.filter(r => r.gstr2bTier === 'unmatched').length} unmatched
-            </span>
-          )}
-        </div>
+      {/* GSTR-2B JSON upload — parsed and matched against the live Tally register */}
+      <UploadPanel
+        title="Reconciliation Inputs"
+        description="Upload the GSTR-2B JSON downloaded from the GST portal. It is parsed and matched against the live Tally purchase register above by GSTIN, invoice number and tax value."
+        requiredFiles={reqFiles}
+        onFilesChange={setReqFiles}
+        onFileContent={handle2bJson}
+        accept=".json,application/json"
+      />
+
+      {parseError && (
+        <Card className="border-red-200 bg-red-50/40">
+          <div className="flex items-center gap-2 text-sm text-red-700">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            {parseError}
+          </div>
+        </Card>
+      )}
+
+      {matchCounts && (
+        <Card className="bg-brand-50/30 border-brand/20">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="w-8 h-8 rounded-full bg-brand-50 text-brand flex items-center justify-center">
+                <ArrowRightLeft className="w-4 h-4" />
+              </span>
+              <span className="text-sm font-semibold text-ink">GSTR-2B match complete</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <Badge tone="green">Exact: {matchCounts.exact}</Badge>
+              <Badge tone="orange">Value mismatch: {matchCounts.near}</Badge>
+              <Badge tone="lavender">Probable: {matchCounts.probable}</Badge>
+              <Badge tone="amber">Not in 2B: {matchCounts.unmatched}</Badge>
+            </div>
+          </div>
+        </Card>
       )}
 
       {!liveRows ? (
@@ -265,7 +298,7 @@ export default function GST2BReco() {
             <MailWarning className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
             <div>
               <h3 className="text-sm font-semibold text-ink">{bucketCounts.C} supplier{ bucketCounts.C !== 1 ? 's' : '' } to follow up — Bucket C</h3>
-              <p className="text-xs text-ink-muted mt-1">₹ {inrCompact(bucketValues.C)} in input credit at stake. Click a row to view supplier detail, then mark follow-up sent.</p>
+              <p className="text-xs text-ink-muted mt-1">₹ {inr(bucketValues.C)} in input credit at stake. Click a row to view supplier detail, then mark follow-up sent.</p>
             </div>
           </div>
         </Card>
@@ -330,7 +363,7 @@ export default function GST2BReco() {
             onChange={setTab}
           />
           <DataTable
-            columns={COLUMNS}
+            columns={columns}
             data={filtered}
             onRowClick={(row) => setDrill(row)}
             exportFilename="gst-2b-reconciliation.csv"
@@ -384,51 +417,29 @@ export default function GST2BReco() {
         </>
       )}
 
-      {/* Drill-down modal */}
+      {/* Drill-down modal — shows all raw Tally columns + computed fields */}
       <Modal open={!!drill} onClose={() => setDrill(null)} title={drill?.supplier ? `Invoice: ${drill.invoice}` : 'Detail'}>
-        {drill && (
+        {drill && (() => {
+            const st = reconciliationStatus(drill, !!portal2b);
+            return (
           <div className="space-y-4 text-sm">
             <div className="grid grid-cols-2 gap-2">
-              <div><span className="text-ink-muted">Supplier:</span> <span className="font-medium">{drill.supplier}</span></div>
-              <div><span className="text-ink-muted">GSTIN:</span> <span className="font-medium">{drill.gstin}</span></div>
-              <div><span className="text-ink-muted">Invoice:</span> <span className="font-medium">{drill.invoice}</span></div>
-              <div><span className="text-ink-muted">Date:</span> <span className="font-medium">{formatDate(drill.date)}</span></div>
-              <div><span className="text-ink-muted">Taxable:</span> <span className="font-bold">{inr(drill.taxable)}</span></div>
-              <div><span className="text-ink-muted">Tax:</span> <span className="font-bold">{inr(drill.tax)}</span></div>
+              {columnKeys.map((key) => (
+                <div key={key}>
+                  <span className="text-ink-muted">{key}:</span>{' '}
+                  <span className="font-medium">{String(drill[key] ?? '')}</span>
+                </div>
+              ))}
             </div>
             <div className="pt-3 border-t border-line grid grid-cols-2 gap-2">
               <div>
-                <span className="text-ink-muted">Sales Status:</span>{' '}
-                <Badge tone={SALES_STATUS[drill._salesStatus]?.tone}>{SALES_STATUS[drill._salesStatus]?.label}</Badge>
-              </div>
-              <div>
-                <span className="text-ink-muted">GSTR-2B:</span>{' '}
-                <Badge tone={GSTR2B_STATE[drill._gstr2bState]?.tone}>{GSTR2B_STATE[drill._gstr2bState]?.label}</Badge>
-              </div>
-              <div>
-                <span className="text-ink-muted">Match Tier:</span>{' '}
-                <span className="font-medium capitalize">{drill.gstr2bTier}</span>
-              </div>
-              <div>
-                <span className="text-ink-muted">Bucket:</span>{' '}
-                {drill._bucket === 'hold' ? (
-                  <Badge tone="orange">Needs Review</Badge>
-                ) : (
-                  <Badge tone={BUCKET_MAP[drill._bucket]?.tone}>{BUCKET_MAP[drill._bucket]?.label}</Badge>
-                )}
-                {drill._dataGap && drill._bucket === 'B' && <Badge tone="red" className="ml-1">Blocked — Cost Centre</Badge>}
-              </div>
-              <div className="col-span-2">
-                <span className="text-ink-muted">Cost Centre:</span>{' '}
-                <span className="font-medium">{drill.costCentre || '(not allocated — fix in Tally)'}</span>
-              </div>
-              <div className="col-span-2">
-                <span className="text-ink-muted">Sales Invoice:</span>{' '}
-                <span className="font-medium">{drill.salesInvoiceNo || '(not raised)'}</span>
+                <span className="text-ink-muted">Reconciliation:</span>{' '}
+                <Badge tone={st.tone}>{st.label}</Badge>
               </div>
             </div>
           </div>
-        )}
+            );
+          })()}
       </Modal>
         </>
       )}

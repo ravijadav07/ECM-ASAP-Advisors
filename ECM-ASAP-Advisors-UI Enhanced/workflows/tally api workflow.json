@@ -1,0 +1,149 @@
+﻿{
+  "created": "1787129586441",
+  "updated": "1787129586441",
+  "name": "tally api workflow",
+  "description": "",
+  "tags": [],
+  "pieces": [
+    "@puchoaistudio/tool-webhook",
+    "@puchoaistudio/tool-tallyconnectionv3"
+  ],
+  "template": {
+    "displayName": "tally api workflow",
+    "trigger": {
+      "name": "trigger",
+      "valid": true,
+      "displayName": "Catch Webhook",
+      "type": "TOOL_TRIGGER",
+      "settings": {
+        "pieceName": "@puchoaistudio/tool-webhook",
+        "pieceVersion": "^2.0.4",
+        "input": {
+          "authType": "none",
+          "authFields": {}
+        },
+        "sampleData": {},
+        "propertySettings": {
+          "authType": {
+            "type": "MANUAL"
+          },
+          "authFields": {
+            "type": "MANUAL",
+            "schema": {}
+          },
+          "liveMarkdown": {
+            "type": "MANUAL"
+          },
+          "syncMarkdown": {
+            "type": "MANUAL"
+          },
+          "testMarkdown": {
+            "type": "MANUAL"
+          }
+        },
+        "triggerName": "catch_webhook"
+      },
+      "nextAction": {
+        "name": "step_1",
+        "skip": false,
+        "type": "PIECE",
+        "valid": true,
+        "settings": {
+          "input": {
+            "secretCode": "ECM",
+            "tallyconnection": "6dbd5e72-8731-474f-8946-370de762e121",
+            "incomingSecretKey": "{{trigger['body']['token_key']}}"
+          },
+          "pieceName": "@puchoaistudio/tool-tallyconnectionv3",
+          "actionName": "get_tally_connection",
+          "sampleData": {},
+          "pieceVersion": "^2.1.2",
+          "propertySettings": {
+            "secretCode": {
+              "type": "MANUAL"
+            },
+            "tallyconnection": {
+              "type": "MANUAL"
+            },
+            "incomingSecretKey": {
+              "type": "MANUAL"
+            }
+          },
+          "errorHandlingOptions": {
+            "retryOnFailure": {
+              "value": false
+            },
+            "continueOnFailure": {
+              "value": false
+            }
+          }
+        },
+        "nextAction": {
+          "name": "step_2",
+          "skip": false,
+          "type": "PIECE",
+          "valid": true,
+          "settings": {
+            "input": {
+              "fields": {
+                "body": "{{step_1}}",
+                "status": 200,
+                "headers": {}
+              },
+              "respond": "stop",
+              "responseType": "json"
+            },
+            "pieceName": "@puchoaistudio/tool-webhook",
+            "actionName": "return_response",
+            "sampleData": {},
+            "pieceVersion": "^2.0.4",
+            "propertySettings": {
+              "fields": {
+                "type": "MANUAL",
+                "schema": {
+                  "body": {
+                    "type": "JSON",
+                    "required": true,
+                    "displayName": "JSON Body"
+                  },
+                  "status": {
+                    "type": "NUMBER",
+                    "required": false,
+                    "displayName": "Status",
+                    "defaultValue": 200
+                  },
+                  "headers": {
+                    "type": "OBJECT",
+                    "required": false,
+                    "displayName": "Headers"
+                  }
+                }
+              },
+              "respond": {
+                "type": "MANUAL"
+              },
+              "responseType": {
+                "type": "MANUAL"
+              }
+            },
+            "errorHandlingOptions": {
+              "retryOnFailure": {
+                "value": false
+              },
+              "continueOnFailure": {
+                "value": false
+              }
+            }
+          },
+          "displayName": "Return Response"
+        },
+        "displayName": "Tally Connection"
+      }
+    },
+    "valid": true,
+    "agentIds": [],
+    "connectionIds": [],
+    "schemaVersion": "7"
+  },
+  "blogUrl": ""
+}

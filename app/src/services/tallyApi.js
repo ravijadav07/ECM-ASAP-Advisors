@@ -5,7 +5,9 @@
 
 const WEBHOOK_URL = import.meta.env.VITE_PUCHO_WEBHOOK_URL || '';
 const WEBHOOK_SECRET = import.meta.env.VITE_PUCHO_WEBHOOK_SECRET || '';
-const CORE_API_BASE = import.meta.env.VITE_PUCHO_CORE_API_BASE_URL || 'https://core-api.pucho.ai';
+// /core-api works in both dev (Vite dev proxy) and production (nginx reverse proxy).
+// nginx.conf proxies /core-api/ → https://core-api.pucho.ai/ — same-origin, no CORS.
+const CORE_API_BASE = import.meta.env.VITE_PUCHO_CORE_API_BASE_URL || '/core-api';
 
 let cachedAuth = null;
 

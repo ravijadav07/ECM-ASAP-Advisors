@@ -44,31 +44,49 @@ function num(row, keys) {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Map template 44 (GSTR-2B reconciliation) response → purchase rows. */
+/** Map template 44 (GSTR-2B reconciliation) response → purchase rows.
+ *  Preserves ALL raw Tally column names exactly as returned by the query.
+ *  Also adds computed fields (_salesStatus, _gstr2bState, _bucket, _dataGap)
+ *  which are set by the page component after mapping. */
 export function mapGst2bRows(raw) {
   const data = extractArray(raw);
-  return data.map((r, i) => ({
-    id: `G${i + 1}`,
-    date: pick(r, ['Date', 'date', 'VoucherDate', 'Voucher Date']),
-    supplier: pick(r, ['Particulars', 'Supplier', 'Supplier Name', 'Party', 'party', 'supplier']),
-    gstin: pick(r, ['Party GSTIN/UIN', 'GSTIN', 'Gstin', 'gstin', 'PartyGSTIN']),
-    vchType: pick(r, ['Vch Type', 'Voucher Type', 'VoucherType', 'vchType']),
-    vchNo: pick(r, ['Vch No.', 'Voucher No', 'VoucherNo', 'VchNo', 'vchNo']),
-    taxable: num(r, ['Taxable Amount', 'TaxableAmount', 'Taxable', 'taxable']),
-    igst: num(r, ['IGST', 'igst', 'IGST Amount', 'Igst']),
-    cgst: num(r, ['CGST', 'cgst', 'CGST Amount', 'Cgst']),
-    sgst: num(r, ['SGST/UTGST', 'SGST', 'sgst', 'SGST Amount', 'Sgst', 'UTGST', 'utgst']),
-    cess: num(r, ['Cess', 'cess', 'Cess Amount']),
-    tax: num(r, ['Tax Amount', 'TaxAmount', 'Tax', 'tax']),
-    costCentre: pick(r, ['CostCentre', 'Cost Centre', 'costCentre', 'cost_centre']),
-    salesInvoiceDate: pick(r, ['Sales Invoice Date', 'SalesInvoiceDate', 'salesInvoiceDate']),
-    salesInvoiceNo: pick(r, ['Sales Invoice No.', 'Sales Invoice No', 'SalesInvoiceNo', 'salesInvoiceNo']),
-    salesParty: pick(r, ['Sales Party', 'SalesParty', 'Customer', 'customer', 'salesParty']),
-    invoice: pick(r, ['Supplier Invoice No.', 'Supplier Invoice No', 'SupplierInvoiceNo', 'invoice']),
-    supplierInvoiceDate: pick(r, ['Supplier Invoice Date', 'SupplierInvoiceDate', 'supplierInvoiceDate']),
-    invoiceMatchKey: pick(r, ['Invoice Match Key', 'InvoiceMatchKey', 'invoiceMatchKey']),
-    gstr2bTier: pick(r, ['gstr2bTier', 'MatchTier', 'Match Tier', 'tier']) || '',
-  }));
+  if (data.length > 0) {
+    console.log('[GST 2B mapper] Raw Tally row keys:', Object.keys(data[0]));
+    console.log('[GST 2B mapper] First raw row:', data[0]);
+  }
+  return data.map((r, i) => {
+    // Build a flat row with ALL original Tally keys preserved exactly as-is
+    const row = { id: `G${i + 1}` };
+    // Copy every key from the raw row unchanged
+    for (const k of Object.keys(r || {})) {
+      row[k] = r[k];
+    }
+    // Sanitize: ensure values are proper strings/numbers (not nested objects)
+    for (const k of Object.keys(row)) {
+      if (row[k] !== null && typeof row[k] === 'object') {
+        row[k] = String(row[k]);
+      }
+    }
+    // Also set a `tax` convenience field for bucket computation
+    // (tries common tax column names)
+    const taxVal = num(r, ['Tax Amount', 'TaxAmount', 'Tax', 'tax', 'Total Tax', 'TotalTax']);
+    row._tax = taxVal;
+    return row;
+  });
+}
+
+/** Return the distinct column keys from the first row of a mapped array,
+ *  in the order they appear in the raw object. Used to build the table
+ *  columns dynamically. */
+export function getColumnKeys(rows) {
+  if (!rows || rows.length === 0) return [];
+  const first = rows[0];
+  const keys = [];
+  for (const k of Object.keys(first)) {
+    if (k === 'id' || k === 'gstr2bTier' || k.startsWith('_')) continue; // skip internal fields
+    keys.push(k);
+  }
+  return keys;
 }
 
 /** Map template 45 (Reimbursement audit) response → expense/recovery rows. */
@@ -120,6 +138,10 @@ export function mapReimbursementRows(raw) {
       salesInvoiceNo,
       salesInvoiceDate,
       status,
+      // Raw "Audit Status" text exactly as Tally returns it (matches the CSV export).
+      // Displayed verbatim in the table; `status` above is the derived bucket used for
+      // tabs / stat-card filtering / colour only.
+      auditStatusRaw: String(auditStatusRaw || '').trim(),
       date: pick(r, ['Date', 'date', 'Later Sales Bill Date', 'Voucher Date']),
     };
   });
@@ -133,7 +155,7 @@ function normalizeStatus(raw, recovered, incurred, variance) {
     if (/SHORT/.test(s)) return 'short';
     if (/OVER/.test(s)) return 'over';
     if (/PENDING/.test(s)) return 'pending';
-    if (/FULLY|FULL|RECOVERED|SETTLED/.test(s)) return 'fully';
+    if (/FULLY|FULL|RECOVERED|SETTLED|RECONCIL/.test(s)) return 'fully';
   }
   // Derive from amounts if no status
   if (recovered > 0 && Math.abs(variance) <= 10) return 'fully';
