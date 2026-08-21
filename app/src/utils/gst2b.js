@@ -15,13 +15,24 @@ export const GSTR2B_STATE = {
 
 // 4 explicit cases, not an implicit else.
 // Tally now returns a "Sales Status" column directly — use it first.
+// "NOT APPLICABLE" from Tally means the template couldn't evaluate this row
+// (e.g., data outside the filtered period). Ignore it and use field-based
+// fallback — never let "Not Applicable" reach the UI as a reconciliation result.
 export function computeSalesStatus(row) {
   const raw = findField(row, ['sales status', 'sales_status']);
   if (raw) {
     const s = raw.toUpperCase();
-    if (/NOT.*ALLOCATED|NOT.*ALLOC|NO.*CC|MISSING.*CC/i.test(s)) return 'cc-not-allocated';
-    if (/PENDING|NOT.*RAISED|NOT.*BILLED/i.test(s)) return 'sales-pending';
-    if (/FOUND|BILLED|RAISED|SALES.*BILL/i.test(s)) return 'sales-found';
+    if (/NOT.*APPLICABLE|N\/A|INVALID/i.test(s)) {
+      // Tally returned "Not Applicable" — ignore and use field-based fallback.
+      // This prevents "Not Applicable" from appearing anywhere in the UI.
+    } else if (/NOT.*ALLOCATED|NOT.*ALLOC|NO.*CC|MISSING.*CC/i.test(s)) {
+      return 'cc-not-allocated';
+    } else if (/PENDING|NOT.*RAISED|NOT.*BILLED/i.test(s)) {
+      return 'sales-pending';
+    } else if (/FOUND|BILLED|RAISED|SALES.*BILL/i.test(s)) {
+      return 'sales-found';
+    }
+    // Unknown Tally value — fall through to field-based fallback
   }
   // Fallback: compute from cost centre + sales invoice fields
   const cc = findField(row, ['cost centre', 'costcentre', 'cost center', 'job', 'cc']);

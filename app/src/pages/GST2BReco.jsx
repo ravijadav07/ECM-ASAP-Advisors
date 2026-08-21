@@ -1,11 +1,10 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { TicketCheck, Timer, MailWarning, FileQuestion, ArrowRightLeft, AlertTriangle, HardDrive, RefreshCw } from 'lucide-react';
-import { StatCard, Card, Tabs, Badge, UploadPanel } from '../components/ui';
+import { TicketCheck, Timer, MailWarning, FileQuestion, AlertTriangle, HardDrive, RefreshCw } from 'lucide-react';
+import { StatCard, Card, Badge, UploadPanel, FilterBar, SelectFilter } from '../components/ui';
 import { DataTable, Modal } from '../components/UiComponents';
 import { useView } from '../context/ViewContext';
-import { carryForward } from '../data/mockData';
-import { inr, inrCompact, daysSince, getFinancialYearRange, formatDate } from '../utils/format';
-import { computeSalesStatus, computeGstr2bState, computeBucket, hasDataGap, SALES_STATUS, GSTR2B_STATE } from '../utils/gst2b';
+import { inr, inrCompact, getFinancialYearRange, formatDate } from '../utils/format';
+import { computeSalesStatus, computeGstr2bState, computeBucket, hasDataGap, SALES_STATUS } from '../utils/gst2b';
 import { flattenPortal2b, reconcileWithPortal } from '../utils/gstr2bMatch';
 import { mapGst2bRows, getColumnKeys } from '../utils/tallyMapper';
 import { executeTemplate, getTemplateCache, setTemplateCache } from '../services/tallyApi';
@@ -53,8 +52,11 @@ function buildColumns(columnKeys, jsonUploaded) {
 }
 
 /** Reconciliation status — priority-ordered, first match wins.
- *  CostCentre is not referenced in this column (tracked in Sales Status).
- *  Probable-tier matches map to Not Matched (not auto-labeled Reconciled).
+ *  CostCentre is NOT referenced in this column (tracked in Sales Status).
+ *  - exact match (GSTIN+inv+date+amount tie out) → Reconciled
+ *  - near match (found in JSON but amount/date diff) → Not Matched
+ *  - probable match (ambiguous, needs review) → Not Matched
+ *  - entirely absent from JSON → Not in GSTR-2B Portal
  */
 function reconciliationStatus(r, jsonUploaded) {
   // Priority 1 — no JSON uploaded at all
@@ -63,11 +65,12 @@ function reconciliationStatus(r, jsonUploaded) {
   // JSON is uploaded — evaluate by match tier
   const tier = (r.gstr2bTier || '').toLowerCase();
 
-  // Priority 2 — exact match: details tie out
-  if (tier === 'exact' || tier === 'near') return { tone: 'green', label: 'Reconciled' };
+  // Priority 2 — exact match: all details tie out
+  if (tier === 'exact') return { tone: 'green', label: 'Reconciled' };
 
-  // Priority 3 — found in JSON, but details differ (probable = ambiguous)
-  if (tier === 'probable') return { tone: 'orange', label: 'Not Matched' };
+  // Priority 3 — found in JSON but details don't tie out (near = value mismatch,
+  // probable = invoice-number mismatch). Both are genuine discrepancies, not absences.
+  if (tier === 'near' || tier === 'probable') return { tone: 'orange', label: 'Not Matched' };
 
   // Priority 4 — entirely absent from the uploaded JSON
   return { tone: 'red', label: 'Not in GSTR-2B Portal' };
@@ -107,6 +110,8 @@ export default function GST2BReco() {
   const { view } = useView();
   const [tab, setTab] = useState('all');
   const [drill, setDrill] = useState(null);
+  const [salesStatusFilter, setSalesStatusFilter] = useState('');
+  const [recoFilter, setRecoFilter] = useState('');
 
   const [liveRows, setLiveRows] = useState(() => {
     const tpl = getTemplate('gst2bReconciliation');
@@ -218,9 +223,19 @@ export default function GST2BReco() {
   const columnKeys = useMemo(() => getColumnKeys(computedRows), [computedRows]);
   const columns = useMemo(() => buildColumns(columnKeys, !!portal2b), [columnKeys, portal2b]);
 
-  const filtered = tab === 'all' ? computedRows : computedRows.filter((r) => r._bucket === tab);
-  const cfParked = carryForward.parked;
-  const cfReleased = carryForward.released;
+  const filtered = useMemo(() => {
+    let rows = tab === 'all' ? computedRows : computedRows.filter((r) => r._bucket === tab);
+    if (salesStatusFilter) {
+      rows = rows.filter((r) => r._salesStatus === salesStatusFilter);
+    }
+    if (recoFilter) {
+      const jsonUploaded = !!portal2b;
+      rows = rows.filter((r) => reconciliationStatus(r, jsonUploaded).label === recoFilter);
+    }
+    return rows;
+  }, [computedRows, tab, salesStatusFilter, recoFilter, portal2b]);
+  const cfParked = [];
+  const cfReleased = [];
 
   return (
     <div className="space-y-6">
@@ -347,75 +362,40 @@ export default function GST2BReco() {
         />
       </div>
 
-      {/* Tabs */}
-      {tab !== 'cf' ? (
-        <>
-          <Tabs
-            tabs={[
-              { id: 'all', label: 'All', count: computedRows.length },
-              { id: 'A', label: 'A — Claim', count: bucketCounts.A },
-              { id: 'B', label: 'B — Deferred', count: bucketCounts.B },
-              { id: 'C', label: 'C — Not Uploaded', count: bucketCounts.C },
-              { id: 'hold', label: 'Needs Review', count: bucketCounts.hold },
-              { id: 'cf', label: 'Carry-Forward', count: carryForward.parked.length },
-            ]}
-            active={tab}
-            onChange={setTab}
-          />
-          <DataTable
-            columns={columns}
-            data={filtered}
-            onRowClick={(row) => setDrill(row)}
-            exportFilename="gst-2b-reconciliation.csv"
-            paginate
-            emptyMessage="No records in this bucket."
-          />
-        </>
-      ) : (
-        <>
-          <Tabs
-            tabs={[
-              { id: 'A', label: 'A — Claim', count: bucketCounts.A },
-              { id: 'B', label: 'B — Deferred', count: bucketCounts.B },
-              { id: 'C', label: 'C — Not Uploaded', count: bucketCounts.C },
-              { id: 'hold', label: 'Needs Review', count: bucketCounts.hold },
-              { id: 'cf', label: 'Carry-Forward', count: carryForward.parked.length },
-            ]}
-            active={tab}
-            onChange={setTab}
-          />
+      {/* Quick filters: Sales Status + Reconciliation */}
+      <FilterBar>
+        <SelectFilter
+          label="Sales Status"
+          value={salesStatusFilter}
+          onChange={setSalesStatusFilter}
+          options={Object.entries(SALES_STATUS).map(([k, v]) => ({ value: k, label: v.label }))}
+        />
+        <SelectFilter
+          label="Reconciliation"
+          value={recoFilter}
+          onChange={setRecoFilter}
+          options={[
+            { value: 'JSON Not Uploaded', label: 'JSON Not Uploaded' },
+            { value: 'Reconciled', label: 'Reconciled' },
+            { value: 'Not Matched', label: 'Not Matched' },
+            { value: 'Not in GSTR-2B Portal', label: 'Not in GSTR-2B Portal' },
+          ]}
+        />
+        {(salesStatusFilter || recoFilter) && (
+          <button onClick={() => { setSalesStatusFilter(''); setRecoFilter(''); }} className="h-8 px-3 rounded-full border border-line bg-white text-[11px] font-medium text-ink-muted hover:text-red-500 hover:border-red-200 transition-colors">
+            Clear filters
+          </button>
+        )}
+      </FilterBar>
 
-          {/* Currently Parked */}
-          <Card>
-            <h3 className="text-sm font-semibold text-ink mb-3">Currently Parked (Bucket B — Pending Sale Invoice)</h3>
-            <DataTable
-              columns={PARKED_COLS}
-              data={cfParked}
-              exportFilename="gst-2b-carry-forward-parked.csv"
-              emptyMessage="No items currently parked."
-            />
-          </Card>
-
-          {/* Recently Released */}
-          <Card>
-            <div className="flex items-center gap-2 mb-3">
-              <ArrowRightLeft className="w-4 h-4 text-emerald-600" />
-              <h3 className="text-sm font-semibold text-ink">Recently Released (B→A This Period)</h3>
-              <Badge tone="green">Auto-Moved</Badge>
-            </div>
-            <p className="text-xs text-ink-muted mb-3">
-              These were in Bucket B in the previous period and have been auto-moved to Bucket A because the
-              linked sale invoice was raised. This is the claim-deferral rule working.
-            </p>
-            <DataTable
-              columns={RELEASED_COLS}
-              data={cfReleased}
-              exportFilename="gst-2b-carry-forward-released.csv"
-              emptyMessage="No items released this period."
-            />
-          </Card>
-        </>
-      )}
+      <DataTable
+        columns={columns}
+        data={filtered}
+        onRowClick={(row) => setDrill(row)}
+        exportFilename="gst-2b-reconciliation.csv"
+        paginate
+        emptyMessage="No records."
+      />
 
       {/* Drill-down modal — shows all raw Tally columns + computed fields */}
       <Modal open={!!drill} onClose={() => setDrill(null)} title={drill?.supplier ? `Invoice: ${drill.invoice}` : 'Detail'}>
