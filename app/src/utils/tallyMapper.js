@@ -67,10 +67,15 @@ export function mapGst2bRows(raw) {
         row[k] = String(row[k]);
       }
     }
-    // Also set a `tax` convenience field for bucket computation
-    // (tries common tax column names)
+    // Set normalized helper properties for matching, modal titles, and bucketing
+    row.gstin = pick(r, ['Party GSTIN/UIN', 'GSTIN/UIN', 'GSTIN', 'Party GSTIN', 'partyGstin', 'gstin']);
+    row.invoice = pick(r, ['Supplier Invoice No.', 'Supplier Invoice No', 'Supplier Invoice Number', 'Vch No.', 'Vch No', 'Invoice No.', 'Invoice No', 'invoice']);
+    row.supplier = pick(r, ['Particulars', 'Party', 'Supplier', 'Party Name', 'supplier']);
+    row.date = pick(r, ['Supplier Invoice Date', 'Date', 'Invoice Date', 'date']);
+    row.taxable = num(r, ['Taxable Amount', 'TaxableAmount', 'Taxable Value', 'Taxable', 'taxable']);
     const taxVal = num(r, ['Tax Amount', 'TaxAmount', 'Tax', 'tax', 'Total Tax', 'TotalTax']);
     row._tax = taxVal;
+    row.tax = taxVal;
     return row;
   });
 }
@@ -82,8 +87,12 @@ export function getColumnKeys(rows) {
   if (!rows || rows.length === 0) return [];
   const first = rows[0];
   const keys = [];
+  const internalKeys = new Set([
+    'id', 'gstr2bTier', '_tax', '_portalMatch', '_salesStatus', '_gstr2bState', '_bucket', '_dataGap',
+    'gstin', 'invoice', 'supplier', 'taxable', 'tax', 'date'
+  ]);
   for (const k of Object.keys(first)) {
-    if (k === 'id' || k === 'gstr2bTier' || k.startsWith('_')) continue; // skip internal fields
+    if (k.startsWith('_') || internalKeys.has(k)) continue; // skip internal and normalized helper fields
     keys.push(k);
   }
   return keys;
