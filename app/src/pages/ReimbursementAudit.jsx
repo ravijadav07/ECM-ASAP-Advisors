@@ -4,10 +4,20 @@ import { StatCard, Card, Tabs, Badge } from '../components/ui';
 import { DataTable, Modal, Skeleton } from '../components/UiComponents';
 import { useView } from '../context/ViewContext';
 import { inr, inrCompact, daysSince, getFinancialYearRange, formatDate } from '../utils/format';
-import { mapReimbursementRows } from '../utils/tallyMapper';
+import { mapReimbursementRows, getColumnKeys } from '../utils/tallyMapper';
 import { executeTemplate, getTemplateCache, setTemplateCache } from '../services/tallyApi';
 import { getTemplate } from '../config/tallyTemplates';
 import TallyFetchBar from '../components/TallyFetchBar';
+
+function isReimbNumericHeader(header) {
+  const h = (header || '').toLowerCase();
+  return /amount|debit|credit|value|total|balance|tax|igst|cgst|sgst|cess/i.test(h);
+}
+
+function isReimbDateHeader(header) {
+  const h = (header || '').toLowerCase();
+  return /date/i.test(h);
+}
 
 export default function ReimbursementAudit() {
   const { view } = useView();
@@ -33,9 +43,9 @@ export default function ReimbursementAudit() {
     setTemplateCache(45, data);
     const rows = mapReimbursementRows(data);
     if (rows.length > 0) {
-      const rawArray = Array.isArray(data?.content) ? data.content : (Array.isArray(data) ? data : []);
-      console.log('[Reimbursement] Sample raw Tally row keys:', rawArray[0] ? Object.keys(rawArray[0]).slice(0, 12) : 'none');
-      console.log('[Reimbursement] Sample mapped rows:', rows.slice(0, 3).map(r => ({ cc: r.costCentre, cust: r.customer, head: r.head, incurred: r.incurred, recovered: r.recovered, status: r.status, date: r.date })));
+      const rawKeys = getColumnKeys(rows);
+      console.log('[Reimbursement] Raw Tally columns:', rawKeys.join(', '));
+      console.log('[Reimbursement] Sample rows:', rows.slice(0, 2));
     }
     if (id === fetchIdRef.current) {
       setLiveRows(rows.length > 0 ? rows : null);
@@ -63,21 +73,17 @@ export default function ReimbursementAudit() {
 
   const summary = useMemo(() => {
     const rows = liveRows || [];
-    const notBilled = rows.filter((r) => r.status === 'not-billed');
-    const short = rows.filter((r) => r.status === 'short');
-    const pending = rows.filter((r) => r.status === 'pending');
-    const incurred = rows.reduce((s, r) => s + r.incurred, 0);
-    const recovered = rows.reduce((s, r) => s + r.recovered, 0);
-    const notBilledValue = notBilled.reduce((s, r) => s + r.incurred, 0);
-    const shortfallValue = short.reduce((s, r) => s + (r.incurred - r.recovered), 0);
-    // Standing (balance-based) exposure — the money still sitting unrecovered at
-    // period-end. Net Closing = Closing Debit − Closing Credit, straight from Tally's
-    // balance columns. This reconciles with Tally regardless of opening carry-over,
-    // unlike the transaction-only headline above.
-    const closingDebit = rows.reduce((s, r) => s + (r.closingDebit || 0), 0);
-    const closingCredit = rows.reduce((s, r) => s + (r.closingCredit || 0), 0);
+    const notBilled = rows.filter((r) => r._status === 'not-billed');
+    const short = rows.filter((r) => r._status === 'short');
+    const pending = rows.filter((r) => r._status === 'pending');
+    const incurred = rows.reduce((s, r) => s + (r._incurred || 0), 0);
+    const recovered = rows.reduce((s, r) => s + (r._recovered || 0), 0);
+    const notBilledValue = notBilled.reduce((s, r) => s + (r._incurred || 0), 0);
+    const shortfallValue = short.reduce((s, r) => s + ((r._incurred || 0) - (r._recovered || 0)), 0);
+    const closingDebit = rows.reduce((s, r) => s + (r._closingDebit || 0), 0);
+    const closingCredit = rows.reduce((s, r) => s + (r._closingCredit || 0), 0);
     const netClosing = closingDebit - closingCredit;
-    const openDebitRows = rows.filter((r) => (r.closingDebit || 0) - (r.closingCredit || 0) > 0).length;
+    const openDebitRows = rows.filter((r) => (r._closingDebit || 0) - (r._closingCredit || 0) > 0).length;
     return {
       incurred, recovered,
       headline: notBilledValue + shortfallValue,
@@ -92,11 +98,11 @@ export default function ReimbursementAudit() {
     const rows = liveRows || [];
     return [
       { id: 'all', label: 'All Jobs', count: rows.length },
-      { id: 'not-billed', label: 'Not Billed', count: rows.filter((r) => r.status === 'not-billed').length },
-      { id: 'short', label: 'Short Recovered', count: rows.filter((r) => r.status === 'short').length },
-      { id: 'over', label: 'Over Recovered', count: rows.filter((r) => r.status === 'over').length },
-      { id: 'pending', label: 'Invoice Pending', count: rows.filter((r) => r.status === 'pending').length },
-      { id: 'fully', label: 'Fully Recovered', count: rows.filter((r) => r.status === 'fully').length },
+      { id: 'not-billed', label: 'Not Billed', count: rows.filter((r) => r._status === 'not-billed').length },
+      { id: 'short', label: 'Short Recovered', count: rows.filter((r) => r._status === 'short').length },
+      { id: 'over', label: 'Over Recovered', count: rows.filter((r) => r._status === 'over').length },
+      { id: 'pending', label: 'Invoice Pending', count: rows.filter((r) => r._status === 'pending').length },
+      { id: 'fully', label: 'Fully Recovered', count: rows.filter((r) => r._status === 'fully').length },
     ];
   }, [liveRows]);
 
@@ -108,23 +114,29 @@ export default function ReimbursementAudit() {
     pending: { tone: 'grey', label: 'Invoice Pending' },
   };
 
-  const LINE_COLS = [
-    { header: 'Ledger', accessor: 'head', exportValue: (r) => r.head },
-    { header: 'Cost Centre', accessor: 'costCentre', exportValue: (r) => r.costCentre },
-    { header: 'Opening Debit', accessor: 'openingDebit', align: 'right', render: (r) => inr(r.openingDebit), exportValue: (r) => r.openingDebit },
-    { header: 'Opening Credit', accessor: 'openingCredit', align: 'right', render: (r) => inr(r.openingCredit), exportValue: (r) => r.openingCredit },
-    { header: 'Transactions Debit', accessor: 'incurred', align: 'right', render: (r) => inr(r.incurred), exportValue: (r) => r.incurred },
-    { header: 'Transactions Credit', accessor: 'recovered', align: 'right', render: (r) => inr(r.recovered), exportValue: (r) => r.recovered },
-    { header: 'Closing Debit', accessor: 'closingDebit', align: 'right', render: (r) => inr(r.closingDebit), exportValue: (r) => r.closingDebit },
-    { header: 'Closing Credit', accessor: 'closingCredit', align: 'right', render: (r) => inr(r.closingCredit), exportValue: (r) => r.closingCredit },
-    { header: 'Variance', align: 'right', render: (r) => { const v = r.recovered - r.incurred; return <span className={v < 0 ? 'text-red-600 font-medium' : v > 0 ? 'text-amber-600' : ''}>{inr(v)}</span>; }, exportValue: (r) => r.recovered - r.incurred },
-    { header: 'Later Sales Bill No.', accessor: 'salesInvoiceNo', exportValue: (r) => r.salesInvoiceNo },
-    { header: 'Later Sales Bill Date', accessor: 'salesInvoiceDate', render: (r) => formatDate(r.salesInvoiceDate), exportValue: (r) => r.salesInvoiceDate },
-    { header: 'Audit Status', render: (r) => <Badge tone={STATUS_MAP[r.status]?.tone}>{r.auditStatusRaw || STATUS_MAP[r.status]?.label}</Badge>, exportValue: (r) => r.auditStatusRaw || STATUS_MAP[r.status]?.label },
-    { header: 'Days', align: 'right', render: (r) => daysSince(r.date), exportValue: (r) => daysSince(r.date) },
-  ];
+  // Build table columns dynamically from the actual Tally response keys.
+  const columnKeys = useMemo(() => getColumnKeys(liveRows || []), [liveRows]);
+  const columns = useMemo(() => {
+    const rawCols = columnKeys
+      .filter((key) => key !== 'Audit Status') // skip raw Audit Status — use computed badge instead
+      .map((key) => ({
+        header: key,
+        accessor: key,
+        align: isReimbNumericHeader(key) ? 'right' : undefined,
+        render: isReimbDateHeader(key) ? (r) => formatDate(r[key]) : isReimbNumericHeader(key) ? (r) => inr(r[key]) : undefined,
+        exportValue: (r) => String(r[key] ?? ''),
+      }));
+    return [
+      ...rawCols,
+      {
+        header: 'Audit Status',
+        render: (r) => <Badge tone={STATUS_MAP[r._status]?.tone}>{r._auditStatusRaw || STATUS_MAP[r._status]?.label}</Badge>,
+        exportValue: (r) => r._auditStatusRaw || STATUS_MAP[r._status]?.label,
+      },
+    ];
+  }, [columnKeys]);
 
-  const filteredLines = tab === 'all' ? (liveRows || []) : (liveRows || []).filter((r) => r.status === tab);
+  const filteredLines = tab === 'all' ? (liveRows || []) : (liveRows || []).filter((r) => r._status === tab);
 
   return (
     <div className="space-y-6">
@@ -228,7 +240,7 @@ export default function ReimbursementAudit() {
         <>
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
           <DataTable
-            columns={LINE_COLS}
+            columns={columns}
             data={filteredLines}
             onRowClick={(row) => setDrill(row)}
             exportFilename="reimbursement-audit-line-items.csv"
@@ -258,29 +270,29 @@ export default function ReimbursementAudit() {
         </Card>
       )}
 
-      {/* Drill-down modal */}
-      <Modal open={!!drill} onClose={() => setDrill(null)} title={`Voucher Detail: ${drill?.costCentre || ''}`}>
+      {/* Drill-down modal — shows all raw Tally columns */}
+      <Modal open={!!drill} onClose={() => setDrill(null)} title={`Voucher Detail: ${drill?._costCentre || ''}`}>
         {drill && (
           <div className="space-y-3 text-sm">
             <div className="grid grid-cols-2 gap-2">
-              <div><span className="text-ink-muted">Cost Centre:</span> <span className="font-medium">{drill.costCentre}</span></div>
-              <div><span className="text-ink-muted">Customer:</span> <span className="font-medium">{drill.customer}</span></div>
-              <div><span className="text-ink-muted">Expense Head:</span> <span className="font-medium">{drill.head}</span></div>
-              <div><span className="text-ink-muted">Date:</span> <span className="font-medium">{formatDate(drill.date)}</span></div>
+              {columnKeys.map((key) => (
+                <div key={key}>
+                  <span className="text-ink-muted">{key}:</span>{' '}
+                  <span className="font-medium">{String(drill[key] ?? '')}</span>
+                </div>
+              ))}
             </div>
-            <div className="grid grid-cols-2 gap-2 pt-3 border-t border-line">
-              <div><span className="text-ink-muted">Incurred:</span> <span className="font-bold">{inr(drill.incurred)}</span></div>
-              <div><span className="text-ink-muted">Recovered:</span> <span className="font-bold">{inr(drill.recovered)}</span></div>
-              <div className="col-span-2">
-                <span className="text-ink-muted">Status:</span>{' '}
-                <Badge tone={STATUS_MAP[drill.status]?.tone}>{drill.auditStatusRaw || STATUS_MAP[drill.status]?.label}</Badge>
+            <div className="pt-3 border-t border-line grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-ink-muted">Audit Status:</span>{' '}
+                <Badge tone={STATUS_MAP[drill._status]?.tone}>{drill._auditStatusRaw || STATUS_MAP[drill._status]?.label}</Badge>
               </div>
             </div>
-            {drill.status === 'not-billed' && (
+            {drill._status === 'not-billed' && (
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 mt-3">
                 <p className="text-xs text-amber-700">
                   <strong>Leakage detected:</strong> A customer invoice was raised for this job, but this expense head was
-                  left off the invoice. Recommend issuing a debit note for {inr(drill.incurred)}.
+                  left off the invoice. Recommend issuing a debit note for {inr(drill._incurred)}.
                 </p>
                 {view === 'user' && (
                   <div className="flex gap-2 mt-3">

@@ -89,7 +89,11 @@ export function getColumnKeys(rows) {
   const keys = [];
   const internalKeys = new Set([
     'id', 'gstr2bTier', '_tax', '_portalMatch', '_salesStatus', '_gstr2bState', '_bucket', '_dataGap',
-    'gstin', 'invoice', 'supplier', 'taxable', 'tax', 'date'
+    'gstin', 'invoice', 'supplier', 'taxable', 'tax', 'date',
+    'Audit Status',
+    '_head', '_costCentre', '_openingDebit', '_openingCredit', '_incurred', '_recovered',
+    '_closingDebit', '_closingCredit', '_status', '_auditStatusRaw', '_customer',
+    '_salesInvoiceNo', '_salesInvoiceDate', '_date',
   ]);
   for (const k of Object.keys(first)) {
     if (k.startsWith('_') || internalKeys.has(k)) continue; // skip internal and normalized helper fields
@@ -98,7 +102,10 @@ export function getColumnKeys(rows) {
   return keys;
 }
 
-/** Map template 45 (Reimbursement audit) response → expense/recovery rows. */
+/** Map template 45 (Reimbursement audit) response → expense/recovery rows.
+ *  Preserves ALL raw Tally column names exactly as returned by the query.
+ *  Computed helpers (for stat cards, tabs, filtering) are stored as _-prefixed
+ *  internal fields and excluded from the dynamic table columns. */
 export function mapReimbursementRows(raw) {
   const data = extractArray(raw);
   if (data.length > 0) {
@@ -106,53 +113,55 @@ export function mapReimbursementRows(raw) {
     console.log('[Reimbursement mapper] First raw row:', data[0]);
   }
   return data.map((r, i) => {
-    // Tally template 45 columns: Ledger, Cost Centre, Opening Debit, Opening Credit,
-    // Transactions Debit, Transactions Credit, Closing Debit, Closing Credit,
-    // Later Sales Bill No., Later Sales Bill Date, Audit Status
+    // Build a flat row with ALL original Tally keys preserved exactly as-is
+    const row = { id: `R${i + 1}` };
+    for (const k of Object.keys(r || {})) {
+      row[k] = r[k];
+    }
+    // Sanitize: ensure values are proper strings/numbers (not nested objects)
+    for (const k of Object.keys(row)) {
+      if (row[k] !== null && typeof row[k] === 'object') {
+        row[k] = String(row[k]);
+      }
+    }
+
+    // ---- Computed helpers (internal — _-prefixed) ----
+    // These drive stat cards, tabs, filtering, and drill-down.
+    // They are NOT shown as table columns — the raw Tally keys are.
     const head = pick(r, ['Ledger', 'Ledger Name', 'ledger', 'Particulars', 'Account Name', 'head']);
     const costCentre = pick(r, ['Cost Centre', 'CostCentre', 'costCentre', 'cost_centre']);
     const openingDebit = num(r, ['Opening Debit', 'OpeningDebit', 'opening_debit']);
     const openingCredit = num(r, ['Opening Credit', 'OpeningCredit', 'opening_credit']);
-    const incurred = num(r, ['Transactions Debit', 'Transaction Debit', 'TransactionsDebit', 'transactions_debit']);
-    const recovered = num(r, ['Transactions Credit', 'Transaction Credit', 'TransactionsCredit', 'transactions_credit']);
+    let inc = num(r, ['Transactions Debit', 'Transaction Debit', 'TransactionsDebit', 'transactions_debit']);
+    let rec = num(r, ['Transactions Credit', 'Transaction Credit', 'TransactionsCredit', 'transactions_credit']);
     const closingDebit = num(r, ['Closing Debit', 'ClosingDebit', 'closing_debit']);
     const closingCredit = num(r, ['Closing Credit', 'ClosingCredit', 'closing_credit']);
-    const salesInvoiceNo = pick(r, ['Later Sales Bill No.', 'Later Sales Bill No', 'LaterSalesBillNo', 'later_sales_bill_no', 'Sales Invoice No.']);
-    const salesInvoiceDate = pick(r, ['Later Sales Bill Date', 'LaterSalesBillDate', 'later_sales_bill_date', 'Sales Invoice Date']);
     const auditStatusRaw = pick(r, ['Audit Status', 'AuditStatus', 'audit_status', 'Status', 'status']);
 
-    // Fallback: if transaction columns absent, try generic debit/credit aliases
-    let inc = incurred;
-    let rec = recovered;
     if (inc === 0 && rec === 0) {
       inc = num(r, ['Debit', 'debit', 'Debit Amount', 'Dr Amount', 'Amount']);
       rec = num(r, ['Credit', 'credit', 'Credit Amount', 'Cr Amount', 'Recovery']);
     }
 
     const variance = rec - inc;
-    // Normalize Audit Status → frontend status key
     const status = normalizeStatus(auditStatusRaw, rec, inc, variance);
 
-    return {
-      id: `R${i + 1}`,
-      head,
-      costCentre,
-      customer: pick(r, ['Customer', 'Party', 'customer', 'Party Ledger', 'Sales Party']),
-      openingDebit,
-      openingCredit,
-      incurred: inc,
-      recovered: rec,
-      closingDebit,
-      closingCredit,
-      salesInvoiceNo,
-      salesInvoiceDate,
-      status,
-      // Raw "Audit Status" text exactly as Tally returns it (matches the CSV export).
-      // Displayed verbatim in the table; `status` above is the derived bucket used for
-      // tabs / stat-card filtering / colour only.
-      auditStatusRaw: String(auditStatusRaw || '').trim(),
-      date: pick(r, ['Date', 'date', 'Later Sales Bill Date', 'Voucher Date']),
-    };
+    row._head = head;
+    row._costCentre = costCentre;
+    row._openingDebit = openingDebit;
+    row._openingCredit = openingCredit;
+    row._incurred = inc;
+    row._recovered = rec;
+    row._closingDebit = closingDebit;
+    row._closingCredit = closingCredit;
+    row._status = status;
+    row._auditStatusRaw = String(auditStatusRaw || '').trim();
+    row._customer = pick(r, ['Customer', 'Party', 'customer', 'Party Ledger', 'Sales Party']);
+    row._salesInvoiceNo = pick(r, ['Later Sales Bill No.', 'Later Sales Bill No', 'LaterSalesBillNo', 'later_sales_bill_no', 'Sales Invoice No.']);
+    row._salesInvoiceDate = pick(r, ['Later Sales Bill Date', 'LaterSalesBillDate', 'later_sales_bill_date', 'Sales Invoice Date']);
+    row._date = pick(r, ['Date', 'date', 'Later Sales Bill Date', 'Voucher Date']);
+
+    return row;
   });
 }
 
